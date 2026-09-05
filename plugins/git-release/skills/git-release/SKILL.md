@@ -8,8 +8,9 @@ description: >-
   resolving a halted merge, or cleaning up old release branches. Covers the
   git-config state model that makes `.git/config` the source of truth, the
   three ways to cut a candidate and when each is wrong, and the guardrails
-  that prevent the silent failures (interactive prompts hanging an agent,
-  a bumped candidate after a failed roll, `reset` discarding your work).
+  that prevent the silent failures (interactive prompts that hang an agent or,
+  worse, act on an empty answer; a bumped candidate after a failed roll;
+  `reset` discarding your work).
 user-invocable: true
 allowed-tools: Bash, Read, Grep, Glob
 argument-hint: "[what you are trying to do with the release]"
@@ -57,6 +58,11 @@ there**. `roll` leaves you on the new RC; `stage`/`qa`/`to` leave you on the
 deploy target; `cleanrelease` and the cleanup commands leave you on main. Always
 record the starting branch and restore it when you're done.
 
+Exit codes are usable but narrow. `roll`/`next`/`append` return 1 when a merge
+conflicts and correctly skip the push (verified), but they return **0 even if
+the push itself fails** — a zero exit is not evidence the RC reached origin.
+See §9.
+
 ## 2. The state model
 
 ```
@@ -102,13 +108,15 @@ git release branches                       # the current list
   `origin/feature/login`.
 - `add` refuses (`exit 1`) when no release is initialized. Run
   `git release init <version> <candidate>` first — see `git-release-setup`.
+- `add` with **no** argument stores an empty entry on older builds (exit 0, no
+  complaint); guarded builds reject it. Either way, always pass the ref.
 - Whatever you store is passed straight to `git merge`, so it must be a ref that
   resolves after `git fetch --all`. Prefer `origin/<branch>` over a local name:
   a local branch can be stale, and the merge will silently use the stale tip.
 
 `git release feature <search>` and `git release rm` do the same work through a
-numbered picker. **They block on `read`.** Use them only when a human is at the
-keyboard; from an agent session, resolve the branch yourself and call
+numbered picker, and both need a terminal (§8). Use them only when a human is at
+the keyboard; from an agent session, resolve the branch yourself and call
 `add`/`remove`:
 
 ```bash
@@ -148,6 +156,11 @@ Mechanics worth knowing:
   aborts all three with `exit 1`.
 - `git release push` pushes the current RC — the manual follow-up after you
   resolve conflicts.
+- **Nothing checks for a dirty tree.** `roll` runs `git checkout <main>` and
+  carries uncommitted changes onto the new RC, where the release-file commit can
+  sweep them in; if the checkout is refused outright, the script keeps going and
+  cuts the RC from wherever you were standing. Check `git status --porcelain`
+  before any cut.
 
 ## 5. When a cut halts on conflicts
 
@@ -197,17 +210,18 @@ discovering the prompt mid-run.
 
 ## 7. Guardrails
 
-- **`git release reset` is `git reset --hard`.** The built-in help calls it
-  "Clear all release config from git config" — that is wrong; it discards your
-  uncommitted work and leaves config untouched. To actually clear release state,
-  unset the keys yourself:
-  `git config --local --remove-section releases`.
-- **`git release rm` takes no argument.** Help shows `rm <branch>`; the command
-  ignores it and opens a picker. `remove <branch>` is the one that takes a ref.
-- **An unrecognized command runs as a shell command.** Dispatch is a bare
-  `$COMMAND "$@"`, so `git release ls` runs `ls` and `git release status2` fails
-  with "command not found" rather than a usage message. Verify command names
-  against `git release help` before scripting them.
+- **`git release reset` is `git reset --hard`.** It discards your uncommitted
+  work and leaves config untouched. To actually clear release state, unset the
+  keys yourself: `git config --local --remove-section releases`. Older builds'
+  help describes it as "Clear all release config from git config" — that text
+  is wrong; believe the behavior.
+- **`git release rm` takes no argument.** Older help shows `rm <branch>`; the
+  command ignores it and opens a picker. `remove <branch>` takes the ref.
+- **An unrecognized command may run as a shell command.** On older builds
+  dispatch is a bare `$COMMAND "$@"`, so `git release ls` runs `ls` and
+  `git release echo hi` prints `hi` — never pass an untrusted string as the
+  subcommand. Guarded builds exit 64 with a usage error. Verify command names
+  against `git release help` either way.
 - **`readin` and `edit` hard-reset the tree.** `readinreleasefile` ends in
   `git reset --hard`; `edit` opens `nano` first. Both are human-only.
 - **Destructive, confirm with the user first:** `dump` (deletes the RC locally
@@ -217,25 +231,89 @@ discovering the prompt mid-run.
   `purgelocalbranches` (sweeps every local branch except main with no prompt at
   all — it uses `git branch -d`, so unmerged branches are refused, but nothing
   else is).
+- **`auto` is a sticky mass-delete answer** in `cleanupmergedlocalbranches` and
+  `cleanupmergedremotebranches`. It is not "yes to this one": `CHOICE` persists
+  across iterations, so one `auto` deletes every remaining branch with no
+  further prompt. Guarded builds say so in the prompt text.
+- **Older builds delete release branches they meant to protect.**
+  `cleanupmergedremotebranches` compares `remotes/origin/<name>` against
+  `releases.branches`, which stores `origin/<name>`, so the "Found in current
+  release" check never matches and branches in the active release are offered
+  up like any other. Verified. Check `git release branches` against the
+  deletion list yourself before confirming anything.
 - **Never report a state you did not read back.** These commands are chatty and
   keep going after a failed step; a wall of output is not proof. Re-run
   `git release status` or the specific `git` query and quote what it said.
 
-## 8. Commands that block on `read`
+## 8. Commands that need a terminal, and what they do without one
 
-An agent session that runs one of these hangs until it is killed. Human-only:
+**First, know which build you are on.** Recent builds guard every prompt; older
+ones do not, and the difference decides whether a mistake is a clean failure or
+silent corruption.
+
+```bash
+git release help | grep -q '\[tty\]' && echo "guarded" || echo "UNGUARDED — read the table"
+```
+
+These commands ask a question, and are human-only either way:
 
 `init` (without both args) · `checkout` (without `true`) · `feature` · `rm` ·
-`newfeature` · `pushfeature` · `devfeature` · `duplicate` · `dump` · `edit` ·
-`cleanup` · `cleanrelease` · `cleanupmergedlocalbranches` ·
+`checkoutfeature` · `newfeature` · `pushfeature` · `devfeature` · `duplicate` ·
+`dump` · `edit` · `cleanup` · `cleanrelease` · `cleanupmergedlocalbranches` ·
 `cleanupmergedremotebranches` · `updatelocal` · `createdevrelease` ·
-`setmainbranch`/`setstagebranch`/`setqabranch`/`set*deployurl` when called
-without a value · `stage`/`qa` when a deploy URL is configured.
+`deploy` (without an environment) · `set*deployurl` (without a value)
 
-Safe unattended: `status`, `version`, `candidate`, `current`, `branches`,
-`releasebranch`, `add`, `remove <ref>`, `roll`, `next`, `append`, `push`,
-`tag`, `merge <branch>`, `to <target>`, `setcandidate <n>`, `checkout true`,
-and the `set*` commands *with* their argument.
+**On a guarded build** they print an error and **exit 78** having done nothing.
+Attempting one costs you an exit code, not state.
+
+**On an unguarded build** the outcome depends on stdin, and neither branch is
+safe:
+
+| stdin | What `read` does | Result |
+|---|---|---|
+| open — a pipe, a PTY nobody types into | blocks forever | the command **hangs** until killed |
+| at EOF — `< /dev/null`, a closed pipe | returns non-zero, leaves the variable **empty** | the command **continues as if empty were the answer** |
+
+The EOF case is the one that bites, because it looks like success — exit 0, no
+error. Confirmed consequences on an unguarded build:
+
+- `git release init` writes `releases.version=""` and
+  `releases.current=release-v`. A later `roll` builds on that.
+- `git release deploy` leaves the environment unresolved, so `git checkout ""`
+  fails, execution continues, and `git reset --hard <main>` **rewrites whichever
+  branch you were standing on**, destroying committed work there. Recoverable
+  only via reflog.
+- `git release add` (no ref) appends an empty entry to `releases.branches`.
+
+y/n confirmations happen to fail safe on EOF (`dump`, the cleanup prompts read
+empty and decline), but do not rely on that — it is a coincidence of each call
+site, not a design.
+
+**Never pipe answers in to get past a prompt.** `printf 'y\nauto\n' | git
+release cleanupmergedremotebranches` is not "answering the first two questions":
+`auto` is a sticky mode that deletes **every remaining branch** with no further
+prompt, because `CHOICE` persists across loop iterations. On a guarded build
+that pipe is refused outright; the deliberate opt-in is
+`GIT_RELEASE_ASSUME_TTY=1`, which you should not reach for on a user's behalf.
+
+### Safe unattended
+
+On **any** build:
+
+`status`, `version`, `candidate`, `current`, `branches`, `releasebranch`,
+`nextreleasebranch`, `add <ref>`, `remove <ref>`, `roll`, `next`, `append`,
+`push`, `to <target>`, `tag`, `setcandidate <n>`, `checkout true`,
+`init <version> <candidate>`, and the `set*branch` commands *with* their value.
+
+On a **guarded** build additionally — these have a prompt, but it is an optional
+follow-up offer that arrives *after* the real work succeeded, so it is declined
+with a `NOTICE` and the command still exits 0:
+
+`stage` and `qa` (the deploy-webhook offer), `merge <branch>` (the tag offer
+when the branch is main), `deploy <env>` (with the environment given).
+
+On an unguarded build those four are **not** safe: `merge main` prompts for the
+tag, and `stage`/`qa` prompt whenever a deploy URL is configured.
 
 `checkout true` is non-interactive but not inert: it switches to the newest RC
 for the current release, rewrites `releases.*`, clears and re-reads the branch

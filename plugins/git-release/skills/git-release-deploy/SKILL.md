@@ -97,10 +97,19 @@ git release deploy [dev|stage|qa|prod]
 - `stage` and `qa` **merge onto** the target (checkout + `git pull` + merge +
   plain push). They accumulate history rather than rebuilding, so an environment
   branch drifts from main over time. `to <target>` is the current mechanism.
-- **`stage` and `qa` prompt** when `releases.stagedeployurl` / `releases.qadeployurl`
-  is set — they ask before `curl`-ing the webhook. That blocks an unattended
-  session. Either run them with a human present, or use `to <target>` and
-  trigger the webhook yourself.
+- **`stage` and `qa` ask before `curl`-ing the webhook** when
+  `releases.stagedeployurl` / `releases.qadeployurl` is set. The merge and push
+  have already happened by then, so guarded builds decline the offer with a
+  `NOTICE` and still exit 0 — safe unattended, the webhook just does not fire.
+  On older builds the same prompt hangs (or, at EOF, silently declines). Either
+  run them with a human present, or use `to <target>` and fire the webhook
+  yourself.
+- **`deploy` needs its environment as an argument.** Without one it asks, and on
+  an unguarded build an empty answer is catastrophic: `TRUNK_BRANCH` stays
+  empty, `git checkout ""` fails, execution continues, and
+  `git reset --hard <main>` **rewrites whatever branch you were standing on**,
+  destroying committed work there. Verified. Guarded builds exit 78 (no
+  environment) or 1 (unknown environment) without touching the tree.
 - `deploy <env>` maps the env to a configured branch, then for non-prod does
   `git reset --hard "$(mainbranch)"` — same rebuild intent as `to`, but off
   **local** main. That is the staleness hazard `to` was changed to avoid; it is
@@ -119,6 +128,13 @@ git release tag            # git tag v$(version) at HEAD; git push --tags
 
 `merge` is the safe merge-back: a normal push, no reset, no force. Use it rather
 than `deploy prod`.
+
+**`merge <main>` asks whether to tag.** The merge and push are already done when
+it asks, so a guarded build declines and exits 0, leaving you to run
+`git release tag` explicitly — which is what you want anyway, since `tag` needs
+you to confirm your position first. On an older build that prompt hangs an
+unattended session; `merge <branch>` is only unconditionally safe when the
+branch is *not* the main branch.
 
 `tag` tags **whatever is currently checked out** with `v$(version)` and pushes
 all tags. It does not verify you are on main and does not create an annotated
@@ -144,7 +160,14 @@ git release setqadeployurl    <url>
 Stored in `.git/config` as `releases.*deployurl`; pass an empty value to unset.
 They are fired by `stage`, `qa`, and `devfeature` — behind a y/n prompt — and
 never by `to`. If your pipeline is triggered by the push itself, leave them
-unset; `to` is then fully non-interactive.
+unset; `to` is then fully non-interactive. Note that an unattended `stage`/`qa`
+on a guarded build **declines** the offer: the branch is deployed but the
+webhook never fires, and the command still exits 0. If the webhook is what
+actually triggers your build, fire it yourself:
+
+```bash
+git release stage && curl -fsS "$(git config --get releases.stagedeployurl)"
+```
 
 ## 6. Verify what is actually deployed
 
@@ -167,6 +190,8 @@ the `merge-base` check above.
 
 - Confirm with the user before anything that force-pushes a branch a human might
   be committing to, and before `deploy prod` in any form.
+- Always pass `deploy` its environment. A bare `git release deploy` is the one
+  command here that can destroy local work outright — see §3.
 - `to`, `stage`, `qa`, `deploy`, and `merge` all leave you standing on the target
   branch. Record the starting branch and check it back out.
 - A `to` run over a dirty tree loses that work to `reset --hard`. Check
