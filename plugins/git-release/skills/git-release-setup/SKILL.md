@@ -37,7 +37,16 @@ git release help         # command inventory (stale in two places — see §6)
 ```
 
 There is no version command. To identify a build, check the checkout:
-`git -C <checkout> log -1 --oneline git-release`.
+`git -C <checkout> log -1 --oneline git-release`. To test for the one capability
+that changes how you may drive the tool — whether prompts are guarded against
+running without a terminal:
+
+```bash
+git release help | grep -q '\[tty\]' && echo guarded || echo unguarded
+```
+
+An unguarded build will act on an empty answer rather than refusing. See §8 of
+the `git-release` skill before scripting anything against one.
 
 ## 2. Initialize a repo
 
@@ -45,7 +54,11 @@ There is no version command. To identify a build, check the checkout:
 git release init 1.4.0 0     # both args -> non-interactive
 ```
 
-Missing arguments make `init` prompt. Always pass both from an agent session.
+Missing arguments make `init` prompt. **Always pass both from an agent
+session** — on a build without the interactive guard, an `init` that reads EOF
+instead of an answer writes `releases.version=""` and
+`releases.current=release-v` and exits 0, and the next `roll` builds on that.
+Guarded builds exit 78 and write nothing.
 
 It writes `releases.version`, `releases.candidate`, and
 `releases.current` (= `release-v<version>`), **clears the branch list**, then
@@ -85,6 +98,11 @@ Called without a value, the `set*deployurl` commands prompt; `setmainbranch` and
 friends called without a value silently store an empty string. Always pass the
 value.
 
+`releases.stagebranch` and `releases.qabranch` always resolve, defaulting to
+`staging`/`qa` on first read, so the "no staging branch configured" prompts in
+`stagebranches`/`qabranches` are unreachable. `releases.devbranch` has no
+default, so `devbranches` really does prompt — set it up front.
+
 Config is local to the clone. A fresh clone, or a colleague's machine, has no
 release state — `git release init`/`checkout` reestablishes it. `releases/<name>`
 committed on the RC branch is the portable backup of the branch list; `readin`
@@ -122,7 +140,8 @@ git commit -m "Bump version to $VERSION" || exit 1   # exit 1 is tolerated on ap
 ## 5. Feature-branch helpers
 
 Convenience wrappers around plain git. **All of them prompt**, so they are for a
-human at a keyboard, not an agent:
+human at a keyboard, not an agent. On a guarded build they exit 78 without
+acting; on an older build they hang, or (at EOF) run partway on empty answers:
 
 - `newfeature` — menu-driven prefix (`feature/`, `bugfix/`, `hotfix/`), checks
   case-insensitively for an existing branch, then branches from
@@ -150,15 +169,21 @@ origin/feature/x`.
 | Candidate number ahead of any real branch | `roll`/`next` bump the candidate *before* doing the work; the cut then failed | `git release setcandidate <n>` to point at the RC that exists |
 | Cut aborts right after the version commit | `afterversioncommit.sh` exited non-zero | run `bash afterversioncommit.sh` by hand and read its output; then `setcandidate` back and re-cut |
 | Wrong trunk used everywhere | `releases.mainbranch` defaulted to `main` on first read | `git release setmainbranch <name>`, then `roll` |
-| A command prompts and an unattended run hangs | most commands use `read` | see the command list in the `git-release` skill; use the non-interactive equivalent |
-| A typo runs a shell command | dispatch is a bare `$COMMAND "$@"` | check the name against `git release help` |
+| A command prompts and an unattended run hangs | stdin is open but nobody is typing | see §8 of the `git-release` skill; use the non-interactive equivalent |
+| A command "succeeded" but state is wrong | on an unguarded build `read` hit EOF and the empty answer was used as the value | `git config --local --get-regexp '^releases\.'` to see what was written; `git release upgrade` to get the guard |
+| `exit 78` from a command | guarded build: it needs an answer typed at a terminal | run it interactively, or use the non-interactive equivalent; `GIT_RELEASE_ASSUME_TTY=1` only for deliberate piping |
+| `exit 64`, "not a git release command" | guarded build: the name is not a defined command | check it against `git release help` |
+| A typo ran a shell command | older builds dispatch a bare `$COMMAND "$@"` | `git release upgrade`; never pass an untrusted string as the subcommand |
+| `deploy` reset the branch you were on | older build, `deploy` run with no environment argument | recover with `git reflog`; always pass the env, and upgrade |
 | `git release reset` ate uncommitted work | it is `git reset --hard`; the help text is wrong | recover from `git reflog` / `git stash list` if anything was staged |
 | Merged branch shows as unmerged in `status` | the check uses **local** main | `git fetch --all && git checkout <main> && git pull`, or use `git merge-base --is-ancestor` |
 
-Two known documentation bugs in `git release help`: `reset` is described as
-clearing release config (it hard-resets the working tree instead), and `rm` is
-shown as taking a branch argument (it ignores arguments and opens a picker —
-`remove <branch>` is the one that takes a ref).
+Two documentation bugs in older `git release help` text, both since corrected:
+`reset` was described as clearing release config (it hard-resets the working
+tree instead), and `rm` was shown as taking a branch argument (it ignores
+arguments and opens a picker — `remove <branch>` is the one that takes a ref).
+If your help output still says either, you are on an old build: the behavior is
+as described here, not as the help claims.
 
 ## 7. Cleanup
 
@@ -175,6 +200,17 @@ All of these delete branches, most of them on `origin`. Every one except
 `purgelocalbranches` prompts per branch — and `purgelocalbranches` is the one
 that does not ask at all (it uses `git branch -d`, so unmerged branches are
 refused; everything else goes). `dump` requires a literal uppercase `Y`.
+
+Two traps in the two `cleanupmerged*` commands:
+
+- **`auto` is not "yes to this one".** `CHOICE` persists across loop
+  iterations, so answering `auto` once deletes **every remaining branch** with
+  no further prompt. Never pipe it in.
+- **On older builds the "in the current release" protection never fires.**
+  `cleanupmergedremotebranches` compares `remotes/origin/<name>` against
+  `releases.branches`, which stores `origin/<name>`, so branches in the active
+  release are offered for deletion like any other. Verified. Diff the deletion
+  list against `git release branches` yourself.
 
 Confirm with the user before running any of them, and never run
 `cleanupmergedremotebranches` without first checking that the release has
