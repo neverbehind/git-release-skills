@@ -1,0 +1,10 @@
+{
+  "name": "git-release",
+  "description": "Skills for cutting and shipping release candidates with the `git-release` CLI: the release lifecycle, feature-branch list management, deploy-trigger branches, and repo setup.",
+  "version": "0.1.0",
+  "author": { "name": "Geoff Douglas", "url": "https://github.com/neverbehind" },
+  "homepage": "https://github.com/neverbehind/git-release",
+  "repository": "https://github.com/neverbehind/git-release-skills",
+  "license": "MIT",
+  "keywords": ["git-release", "git", "release", "git-flow", "release-candidate", "deploy", "cli"]
+}

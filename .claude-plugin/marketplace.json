@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "git-release-skills",
+  "description": "Official Claude Code skills for git-release, the Git Flow-style release candidate CLI — RC branch lifecycle, feature-list management, deploy-trigger branches, and repo setup.",
+  "owner": { "name": "Geoff Douglas", "url": "https://github.com/neverbehind" },
+  "plugins": [
+    {
+      "name": "git-release",
+      "description": "How to cut and ship release candidates from Claude Code with the `git-release` CLI: the git-config state model, roll vs next vs append, the disposable deploy-trigger contract, and which commands are interactive and must not be run unattended. Wraps the `git-release` CLI; installs no tools.",
+      "version": "0.1.0",
+      "author": { "name": "Geoff Douglas" },
+      "category": "development",
+      "keywords": ["git-release", "git", "release", "git-flow", "release-candidate", "deploy", "cli"],
+      "source": "./plugins/git-release"
+    }
+  ]
+}
